@@ -12,9 +12,11 @@ from typing import Any
 
 from app.llm.client import LlmError, Transport, generate_json
 from app.llm.drafts import GLOSS_LANGUAGE, LANGUAGE_NAMES, Draft, Source
+from app.pipeline.compose import template
 from app.pipeline.state import VerifyFinding
 
 L8_PROMPT = "l8_verify_v1.md"
+STATUS_HEAD = template()["head"]  # 복합 문의 메일의 문의 상태 목록 머리(FR-022 처리 3, 고정 문안)
 
 GLOSS_KIND = "GLOSS_MISTRANSLATION"
 KIND_NAMES = {  # 화면 이름 (4-10절 결과 모양)
@@ -91,6 +93,19 @@ class VerifyResult:
         return text
 
 
+def status_block(body: str) -> str:
+    """본문의 문의 상태 목록: 머리부터 그 단락 끝(빈 줄)까지. compose_mail이 부분을 빈 줄로 잇는다. 없으면 빈 글."""
+    start = body.find(STATUS_HEAD)
+    if start < 0:
+        return ""
+    end = body.find("\n\n", start)
+    return body[start:] if end < 0 else body[start:end]
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())  # L8 quote는 줄바꿈을 공백으로 바꿔 내기도 한다
+
+
 def verify_draft(
     transport: Transport,
     draft: Draft,
@@ -116,10 +131,13 @@ def verify_draft(
     except LlmError as exc:
         return VerifyResult(gloss_checked=gloss_checked, error=exc.error_type)
     kept = []
+    status = _flat(status_block(draft.body))
     for item in data["findings"]:
         quote = item["quote"].strip()
         if item["kind"] == GLOSS_KIND and not gloss_checked:
             continue  # 대역이 없으면 ④는 보지 않는다
+        if status and _flat(quote) in status:
+            continue  # 문의 상태 목록은 고정 문안이라 판단 대상이 아니다(변경 fix-verify-status-list)
         if quote and (quote in draft.body or (gloss_body and quote in gloss_body)):
             kept.append(VerifyFinding(kind=item["kind"], quote=quote, reason=item["reason"]))
     return VerifyResult(kept, gloss_checked)

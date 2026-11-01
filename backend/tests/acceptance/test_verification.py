@@ -91,6 +91,39 @@ def test_made_up_quote_is_dropped(conn, index):
     assert draft.verify.detail() == {"findings": [], "gloss_checked": True}
 
 
+# 복합 문의 CSV1-000008의 펌웨어 답변 메일 (compose_mail 모양: 인사말 · 단락 · 상태 목록 · 맺음말을 빈 줄로 잇는다)
+FW_SENTENCE = "Your firmware 3.40 is already the latest version (RN-ESS-BMS-V3 §1)."
+STATUS_LIST = ("Status of your requests:\n1. Firmware update: answered in this email.\n"
+               "2. Manual and document: we are still working on this.")
+COMPOUND_MAIL = "\n\n".join(["مرحبا،", FW_SENTENCE, STATUS_LIST, "مع التحية."])
+
+
+def verify_compound(findings):
+    fake = FakeTransport(L8=[{"findings": findings}])
+    draft = Draft("CSV1-000008-1", "FINAL_REPLY", "ar", COMPOUND_MAIL, gloss=Gloss("ko", "펌웨어 3.40은 이미 최신입니다."))
+    return verify_draft(fake, draft, ["هل يوجد إصدار أحدث من البرنامج الثابت؟"], [], [])
+
+
+def test_ac_049_7_status_list_is_not_off_topic():
+    """제안 AC-049-7 (변경 fix-verify-status-list): 상태 목록 줄을 질문과 다름으로 지적해도 버린다 → ⑤ 통과."""
+    result = verify_compound([{"kind": "OFF_TOPIC", "quote": "2. Manual and document: we are still working on this.",
+                               "reason": "고객이 묻지 않은 매뉴얼"}])
+    assert result.findings == [] and result.mark() == "⑤ 통과"
+
+
+def test_status_list_quote_with_spaces_is_dropped():
+    """상태 목록 여러 줄을 공백으로 이은 quote도 버린다(L8은 줄바꿈을 공백으로 바꿔 내기도 한다)."""
+    quote = " ".join(STATUS_LIST.split("\n"))
+    assert verify_compound([{"kind": "OFF_TOPIC", "quote": quote, "reason": "x"}]).findings == []
+
+
+def test_paragraph_finding_in_compound_mail_is_kept():
+    """제안 AC-049-7: 같은 메일이라도 단락 문장의 지적은 그대로 남는다."""
+    result = verify_compound([{"kind": "PROMISE", "quote": FW_SENTENCE, "reason": "x"},
+                              {"kind": "OFF_TOPIC", "quote": "Status of your requests:", "reason": "x"}])
+    assert [f.quote for f in result.findings] == [FW_SENTENCE] and result.mark() == "⑤ 걸림: 약속 표현"
+
+
 def test_no_gloss_skips_gloss_kind(conn, index):
     """FR-049 예외 3행: 대역이 없으면 ④를 빼고 검증, gloss_checked = false, 꼬리말."""
     finding = {"findings": [{"kind": "GLOSS_MISTRANSLATION", "quote": "Offre valable 30 jours", "reason": "x"}]}
