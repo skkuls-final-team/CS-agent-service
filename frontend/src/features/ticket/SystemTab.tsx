@@ -1,9 +1,11 @@
 // 탭 ② 시스템이 판단한 것 (SCR-03 C-01~C-10, FR-024, 문의마다 한 칸). 배치는 목업 v1.42 `judgSection`(이름 | 값 | 왜?).
 // 유형·긴급도·제품 고치기(FR-030 처리 5), 받은 항목 표시(C-07), 우선순위 [조정](P3), 실행 기록(C-11)도 이 탭에 둔다.
-import { Fragment, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type Detail, type EvidenceRow, type FaultCandidate, type RunRow, type SubTicket } from "../../api";
 import { CATEGORY, URGENCY, label } from "../../app/labels";
-import { Button, Chip, Field, PriorityBadge, SlaBadge, StatusBadge } from "../../ui";
+import { Chip, Field, PriorityBadge, SlaBadge, StatusBadge, Button, formatLeft } from "../../ui";
+import { Icon } from "../../app/icons";
+import { useDepartments } from "../../app/queries";
 import type { SourceTarget } from "./Popups";
 
 const CATEGORIES = ["DEFECT", "FW_UPDATE", "MANUAL", "QUOTE", "TECH_SPEC", "COMPLIANCE", "RETURN", "WARRANTY", "INSTALL", "ORDER_LEAD"];
@@ -77,9 +79,9 @@ function Required({ sub, row, locked, onReceived }: {
       {(row.items ?? []).map((it) => (
         <li key={it.field} className={`is-${it.state}`} data-field={it.field} data-state={it.state}>
           <span aria-hidden="true">{it.state === "provided" ? "✓" : it.state === "blocking" ? "●" : "○"}</span>
-          {it.label}
-          <span className="tk-items__sub">{it.state === "provided" ? `제공(${it.value ?? ""})` : it.state === "blocking" ? "막는 항목" : "빠짐"}</span>
-          {sub.fields.some((f) => f.field === it.field && f.source === "AGENT") && <Chip tone="brand">상담원 입력</Chip>}
+          <span className="tk-items__lab">{it.label}
+            <span className="tk-items__sub">{it.state === "provided" ? `제공(${it.value ?? ""})` : it.state === "blocking" ? "막는 항목" : "빠짐"}</span>
+            {sub.fields.some((f) => f.field === it.field && f.source === "AGENT") && <Chip tone="brand">상담원 입력</Chip>}</span>
           {it.state !== "provided" && !locked && (
             <>
               <input placeholder="받은 값(선택)" aria-label={`${it.label} 받은 값`} value={value[it.field] ?? ""}
@@ -179,6 +181,100 @@ function RunList({ ticketId }: { ticketId: string }) {
   );
 }
 
+/** 판단 표에 항상 보이는 줄(예전 목업 "판단과 근거"): 이름 | 값 | 돋보기. 나머지는 [근거 더 보기]에 접어 둔다 */
+const MAIN_ROWS = ["C-01", "C-02", "C-03", "C-04", "C-06", "C-07"];
+
+const num = (v: number | string | null | undefined): number | null => (v === null || v === undefined ? null : Number(v));
+
+/** C-06 SLA 목표 줄: "1차 응답 기한 …"과 "해결 기한 …"을 따로 적는다(팀 검토: 어느 기한인지 구분) */
+function SlaValue({ sub }: { sub: SubTicket }) {
+  const sla = sub.sla;
+  const st = sub.sub_ticket;
+  if (!sla) return <span className="tk-muted">SLA 미정</span>;
+  const frLeft = !st.first_response_at_utc && sla.fr_status !== "MET" && sla.fr_target_h !== null ? sla.fr_target_h - (num(sla.fr_elapsed_h) ?? 0) : null;
+  const resLeft = st.status === "WAITING_CUSTOMER" || sla.res_target_h === null ? null : (num(sla.remaining_h) ?? sla.res_target_h - (num(sla.res_elapsed_h) ?? 0));
+  const line = (k: string, left: number | null, target: number | null, done?: boolean) => (
+    <span className="tk-sla2"><span className="tk-sla2__k">{k}</span>
+      {done ? <Chip tone="pos">보냄</Chip> : left === null ? <span className="tk-muted">{st.status === "WAITING_CUSTOMER" ? "멈춤" : "미정"}</span>
+        : <b className={left < 0 ? "tk-neg" : undefined}>{formatLeft(left)}</b>}
+      {target !== null && <span className="tk-muted"> / 목표 {target}h</span>}</span>
+  );
+  return <>{line("1차 응답 기한", frLeft, sla.fr_target_h, !!st.first_response_at_utc || sla.fr_status === "MET")}{line("해결 기한", resLeft, sla.res_target_h)}
+    <span className="tk-sr" aria-hidden="true">1차 응답 {sla.fr_target_h}h / 해결 {sla.res_target_h}h</span></>;
+}
+
+function JudgeRow({ sub, row, compact, focus, refs, locked, onAdjust, onEdit, onWhy, onSource }: {
+  sub: SubTicket; row: EvidenceRow; compact: boolean; focus: string | null; refs: React.MutableRefObject<Record<string, HTMLElement | null>>;
+  locked: boolean; onAdjust: (sub: SubTicket) => void; onEdit: (sub: SubTicket, data: Record<string, unknown>) => void;
+  onWhy: (row: EvidenceRow) => void; onSource: (t: SourceTarget) => void;
+}) {
+  const st = sub.sub_ticket;
+  const closed = st.status === "CLOSED";
+  const adj = sub.adjustments[sub.adjustments.length - 1];
+  const depts = useDepartments();
+  const deptName = (code: string) => depts.data?.find((d) => d.dept_code === code)?.dept_name_ko ?? code;
+  const items = row.items ?? [];
+  const needsInput = row.id === "C-07" && items.some((i) => i.state !== "provided");
+  return (
+    <>
+      <div className={[focus === row.id ? "is-focus" : "", "tk-row", compact ? "tk-row--c" : ""].filter(Boolean).join(" ")} data-row={row.id}
+           ref={(el) => (refs.current[row.id] = el)}>
+        <span className="tk-row__k">{row.label.replace(/^[①-⑩]\s*/, "")}</span>
+        <div className="tk-row__v">
+          <span className="tk-row__line">
+            {row.id === "C-03" ? (
+              <>
+                <PriorityBadge priority={st.priority} adjusted={!!adj} />
+                {compact ? (
+                  <>
+                    <span className="tk-muted" title={adj ? `${adj.from_priority} → ${adj.to_priority} (상담원 조정, 사유: ${adj.reason})` : undefined}>
+                      {adj ? `규칙 ${adj.from_priority} → ${adj.to_priority}` : `규칙 ${st.priority_rule_id ?? "—"}`}
+                    </span>
+                    <span className="tk-sr" aria-hidden="true">({st.priority_rule_id ?? "—"})</span>
+                    {adj && <span className="tk-sr">{adj.from_priority} → {adj.to_priority} (상담원 조정, 사유: {adj.reason})</span>}
+                  </>
+                ) : (
+                  <>
+                    <span className="tk-muted">규칙값 {sub.adjustments[0]?.from_priority ?? st.priority ?? "—"} ({st.priority_rule_id ?? "—"})</span>
+                    {adj && <span>{adj.from_priority} → {adj.to_priority} (상담원 조정, 사유: {adj.reason})</span>}
+                  </>
+                )}
+                <button type="button" className="tk-link tk-link--b" disabled={locked || closed || !st.priority} onClick={() => onAdjust(sub)}>조정</button>
+              </>
+            ) : row.id === "C-01" ? (
+              <>{row.result.startsWith("없음") ? <span className="tk-muted">{row.result}</span> : <>{label(CATEGORY, row.result)}{!compact ? <> <span className="tk-mono">{row.result}</span></> : <span className="tk-sr" aria-hidden="true"> {row.result}</span>}</>}<Edited sub={sub} name="category_code" /></>
+            ) : row.id === "C-02" ? (
+              <>{URGENCY[row.result] ?? row.result}{!compact ? <> <span className="tk-mono">{row.result}</span></> : <span className="tk-sr" aria-hidden="true"> {row.result}</span>}<Edited sub={sub} name="urgency_flag" /></>
+            ) : row.id === "C-06" && compact ? (
+              <SlaValue sub={sub} />
+            ) : row.id === "C-07" && compact ? (
+              <><b>{items.filter((i) => i.state === "provided").length}/{items.length}</b>
+                {needsInput ? <Chip tone={items.some((i) => i.state === "blocking") ? "neg" : "crit"}>{items.some((i) => i.state === "blocking") ? "막는 항목 있음" : "빠진 항목 있음"}</Chip> : <Chip tone="pos">충족</Chip>}</>
+            ) : row.id === "C-04" && compact ? (
+              <><span title={row.result}>{deptName(row.result)}</span><span className="tk-sr" aria-hidden="true"> {row.result}</span></>
+            ) : (
+              <span className={row.result.startsWith("없음") ? "tk-muted" : undefined}>{row.result}</span>
+            )}
+            {row.id === "M-C-01" && <Edited sub={sub} name="product_code" />}
+          </span>
+          {row.id === "C-07" && items.length ? (
+            compact && !needsInput ? (
+              <ul className="tk-items tk-items--ok" data-testid={`required-${st.seq}`}>
+                {items.map((it) => <li key={it.field} className="is-provided" data-field={it.field} data-state="provided"><span aria-hidden="true">✓</span>{it.label}</li>)}
+              </ul>
+            ) : (
+              <Required sub={sub} row={row} locked={locked || closed}
+                        onReceived={(field, value) => onEdit(sub, { received_fields: [{ field, value: value || null }] })} />
+            )
+          ) : !compact && <RowBody sub={sub} row={row} onSource={onSource} />}
+        </div>
+        {/* 돋보기: 근거(근거 문장·규칙)는 누르면 창으로 연다. 페이지가 길어지지 않게 한다 */}
+        <button type="button" className="tk-why tk-why--icon" aria-label="근거 보기" title="근거 보기" onClick={() => onWhy(row)}><Icon name="search" /></button>
+      </div>
+    </>
+  );
+}
+
 export function SystemTab({ detail, locked, focus, onWhy, onSource, onAdjust, onEdit }: {
   detail: Detail; locked: boolean; focus: string | null;
   onWhy: (row: EvidenceRow) => void; onSource: (t: SourceTarget) => void; onAdjust: (sub: SubTicket) => void;
@@ -194,7 +290,6 @@ export function SystemTab({ detail, locked, focus, onWhy, onSource, onAdjust, on
       {detail.sub_tickets.map((sub) => {
         const st = sub.sub_ticket;
         const closed = st.status === "CLOSED";
-        const adj = sub.adjustments[sub.adjustments.length - 1];
         return (
           <section key={st.sub_ticket_id} className="tk-sub" aria-label={`문의 ${st.seq}`} data-testid={`judge-${st.seq}`}>
             {n > 1 && (
@@ -214,44 +309,20 @@ export function SystemTab({ detail, locked, focus, onWhy, onSource, onAdjust, on
                 <span />
               </div>
             )}
-            {sub.evidence_rows.map((row) => (
-              <Fragment key={row.id}>
-              <div className={focus === row.id ? "tk-row is-focus" : "tk-row"} data-row={row.id}
-                   ref={(el) => (refs.current[row.id] = el)}>
-                <span className="tk-row__k">{row.label.replace(/^[①-⑩]\s*/, "")}</span>
-                <div className="tk-row__v">
-                  <span className="tk-row__line">
-                    {row.id === "C-03" ? (
-                      <>
-                        <PriorityBadge priority={st.priority} adjusted={!!adj} />
-                        <span className="tk-muted">규칙값 {sub.adjustments[0]?.from_priority ?? st.priority ?? "—"} ({st.priority_rule_id ?? "—"})</span>
-                        {adj && <span>{adj.from_priority} → {adj.to_priority} (상담원 조정, 사유: {adj.reason})</span>}
-                        <button type="button" className="tk-link tk-link--b" disabled={locked || closed || !st.priority} onClick={() => onAdjust(sub)}>조정</button>
-                      </>
-                    ) : row.id === "C-01" ? (
-                      <>{row.result.startsWith("없음") ? <span className="tk-muted">{row.result}</span> : <>{label(CATEGORY, row.result)} <span className="tk-mono">{row.result}</span></>}<Edited sub={sub} name="category_code" /></>
-                    ) : row.id === "C-02" ? (
-                      <>{URGENCY[row.result] ?? row.result} <span className="tk-mono">{row.result}</span><Edited sub={sub} name="urgency_flag" /></>
-                    ) : (
-                      <span className={row.result.startsWith("없음") ? "tk-muted" : undefined}>{row.result}</span>
-                    )}
-                    {row.id === "M-C-01" && <Edited sub={sub} name="product_code" />}
-                  </span>
-                  {row.id === "C-07" && row.items?.length ? (
-                    <Required sub={sub} row={row} locked={locked || closed}
-                              onReceived={(field, value) => onEdit(sub, { received_fields: [{ field, value: value || null }] })} />
-                  ) : <RowBody sub={sub} row={row} onSource={onSource} />}
-                </div>
-                {/* 목업의 "왜?" 글자 링크 대신 일반 버튼(2026-10-29 조장 요청) */}
-                <Button size="sm" className="tk-why" onClick={() => onWhy(row)}>근거 보기</Button>
-              </div>
-              </Fragment>
+            {MAIN_ROWS.map((id) => sub.evidence_rows.find((r) => r.id === id)).filter((r): r is EvidenceRow => !!r).map((row) => (
+              <JudgeRow key={row.id} sub={sub} row={row} compact focus={focus} refs={refs} locked={locked} onAdjust={onAdjust} onEdit={onEdit} onWhy={onWhy} onSource={onSource} />
             ))}
-            <EditControls key={`${st.sub_ticket_id}-${sub.version}`} sub={sub} locked={locked || closed} onSave={(data) => onEdit(sub, data)} />
+            <details className="tk-more" open={!!focus && !MAIN_ROWS.includes(focus)}>
+              <summary>근거 더 보기 · 고장 진단 · 이관 후보 · 수정</summary>
+              {sub.evidence_rows.filter((r) => !MAIN_ROWS.includes(r.id)).map((row) => (
+                <JudgeRow key={row.id} sub={sub} row={row} compact={false} focus={focus} refs={refs} locked={locked} onAdjust={onAdjust} onEdit={onEdit} onWhy={onWhy} onSource={onSource} />
+              ))}
+              <EditControls key={`${st.sub_ticket_id}-${sub.version}`} sub={sub} locked={locked || closed} onSave={(data) => onEdit(sub, data)} />
+              {detail.sub_tickets[0] === sub && <RunList ticketId={detail.ticket.ticket_id} />}
+            </details>
           </section>
         );
       })}
-      <RunList ticketId={detail.ticket.ticket_id} />
     </div>
   );
 }

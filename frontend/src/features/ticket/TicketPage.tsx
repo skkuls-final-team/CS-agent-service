@@ -1,5 +1,6 @@
 // SCR-03 티켓 상세 (명세서 FR-030). 배치는 최신 목업(탭 없는 한 화면): 머리 카드 + 지금 할 일 띠 + 경고 띠 +
 // [읽기: 고객이 보낸 것 | 쓰기: 보낼 것] 두 칸(첫 화면) → 시스템이 판단한 것(근거) → 이력. 옛 탭 주소(?tab=)는 그 구역으로 스크롤한다.
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, SNAPSHOT, type Draft, type EvidenceRow, type SubTicket } from "../../api";
 import { useSession } from "../../app/session";
@@ -8,8 +9,7 @@ import { AdjustPopup, EscalatePopup, ReplyPopup } from "./ActionPopups";
 import { CustomerTab } from "./CustomerTab";
 import { useDepartments } from "../../app/queries";
 import { inboxOrder } from "../inbox/inboxQuery";
-import { AiChips } from "./AiChips";
-import { AlertBand, HeadCard, NowStrip } from "./HeadCard";
+import { HeadCard, NowStrip } from "./HeadCard";
 import { OpenTabs, rememberOpenTab } from "./openTabs";
 import { HistoryTab } from "./HistoryTab";
 import { MemoCard } from "./MemoCard";
@@ -27,6 +27,8 @@ const SECTIONS: { key: Section; label: string }[] = [
   { key: "customer", label: "고객이 보낸 것" }, { key: "send", label: "보낼 것" },
   { key: "system", label: "시스템이 판단한 것" }, { key: "history", label: "이력" },
 ];
+/** 오른쪽 칸 탭: 판단과 근거(훑어보는 표) | 고객이 보낸 것(원문·한국어 번역) */
+type Side = "judge" | "customer";
 
 /** 옛 탭 주소(?tab=customer 등)로 들어오면 그 구역으로 스크롤한다. 없으면 맨 위 */
 function sectionFromUrl(): Section | null {
@@ -34,8 +36,13 @@ function sectionFromUrl(): Section | null {
   return SECTIONS.some((x) => x.key === t) ? (t as Section) : null;
 }
 
-function scrollToSection(key: Section) {
+function scrollToSection(key: Section | "side") {
   document.getElementById(`tk-sec-${key}`)?.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+/** 처음부터 원문을 펼쳐 둘 문의: 요약만 보고 보내면 안 되는 것(P1·안전·설비 정지·복합·상세 검토) */
+function riskyOf(subs: SubTicket[]): boolean {
+  return subs.length > 1 || subs.some((x) => x.sub_ticket.priority === "P1" || x.sub_ticket.urgency_flag === "SAFETY" || x.sub_ticket.urgency_flag === "SITE_DOWN" || x.review_depth === "DEEP");
 }
 
 export function TicketPage({ ticketId, agent, onBack, navigate }: { ticketId: string; agent: string; onBack: (message?: string) => void; navigate?: (path: string) => void }) {
@@ -68,6 +75,9 @@ export function TicketPage({ ticketId, agent, onBack, navigate }: { ticketId: st
   const tabSum = query.data ? (query.data.sub_tickets.find((x) => x.sub_ticket.summary_ko)?.sub_ticket.summary_ko ?? query.data.ticket.inquiry_subject ?? "") : null;
   useEffect(() => { if (tabSum !== null) rememberOpenTab(ticketId, tabSum.slice(0, 40)); }, [ticketId, tabSum]);
   const [sendKind, setSendKind] = useState<Draft["message_type"] | null>(null);
+  const [sideTab, setSideTab] = useState<Side | null>(sectionFromUrl() === "customer" ? "customer" : sectionFromUrl() === "system" ? "judge" : null); // null = 문의에 따라 정한다
+  const [historyOpen, setHistoryOpen] = useState(sectionFromUrl() === "history");
+  const notes = useQuery({ queryKey: ["notes", ticketId], queryFn: () => api.notes(ticketId) });
   const [focus, setFocus] = useState<string | null>(null);
   const [why, setWhy] = useState<EvidenceRow | null>(null);
   const [source, setSource] = useState<SourceTarget | null>(null);
@@ -122,7 +132,9 @@ export function TicketPage({ ticketId, agent, onBack, navigate }: { ticketId: st
     .map((d) => d.sent!.sent_at_utc).sort().pop() ?? null;
   const canReply = !locked && subs.some((s) => s.sub_ticket.status === "WAITING_CUSTOMER");
 
-  const jump = (rowId: string) => { scrollToSection("system"); setFocus(null); setTimeout(() => setFocus(rowId)); };
+  const side: Side = sideTab ?? (riskyOf(subs) ? "customer" : "judge");
+  const showSide = (tab: Side) => { setSideTab(tab); setTimeout(() => scrollToSection("side")); };
+  const jump = (rowId: string) => { setSideTab("judge"); setFocus(null); setTimeout(() => { setFocus(rowId); scrollToSection("side"); }); };
   const processingPane = (
     <div className="tk-pane"><p className="tk-busy" role="status" data-testid="processing">처리 중. 끝나면 자동으로 채워집니다</p></div>
   );
@@ -135,20 +147,12 @@ export function TicketPage({ ticketId, agent, onBack, navigate }: { ticketId: st
       {navigate && <OpenTabs current={ticketId} navigate={navigate} />}
       <HeadCard detail={detail} onBack={() => onBack()} onReprocess={reprocess} busy={busy}
                 nav={navigate ? { ids: order, index, go: goTo } : undefined}
-                onEvidence={() => scrollToSection("system")}
+                onEvidence={() => showSide("judge")} onOriginal={() => showSide("customer")}
                 escalate={subs.some((x) => x.writer === "CS") ? { disabled: locked || busy || !canEscalate, title: escalateTitle, onClick: () => setEscalating(true) } : undefined} />
-      <AiChips detail={detail} onJump={jump} />
-      <NowStrip detail={detail} deptName={(code) => depts.data?.find((d) => d.dept_code === code)?.dept_name_ko ?? code ?? "담당 부서"} />
-      <AlertBand detail={detail} onShowSend={() => { scrollToSection("send"); setSendKind("INFO_REQUEST"); }} />
+      <NowStrip detail={detail} onShowSend={() => { scrollToSection("send"); setSendKind("INFO_REQUEST"); }}
+                deptName={(code) => depts.data?.find((d) => d.dept_code === code)?.dept_name_ko ?? code ?? "담당 부서"} />
       <div className="tk-body">
-        <div className="tk-cols">
-          <div className="tk-leftcol">
-            <section id="tk-sec-customer" className="tk-sec" aria-label="고객 문의 원문">
-              <h2 className="tk-sec__h">고객 문의 원문</h2>
-              <CustomerTab detail={detail} />
-            </section>
-            <MemoCard ticketId={ticketId} agent={agent} />
-          </div>
+        <div className="tk-cols tk-cols--work">
           <section id="tk-sec-send" className="tk-sec" aria-label="답변 초안">
             <h2 className="tk-sec__h">답변 초안</h2>
             {detail.processing ? processingPane : (
@@ -156,20 +160,37 @@ export function TicketPage({ ticketId, agent, onBack, navigate }: { ticketId: st
                        onSource={setSource} onJump={jump} onFail={setFail} refresh={refresh} />
             )}
           </section>
+          <section id="tk-sec-side" className="tk-sec tk-side" aria-label="판단과 고객 원문">
+            <div className="tk-side__tabs" role="tablist" aria-label="오른쪽 칸">
+              <button type="button" role="tab" aria-selected={side === "judge"} className={side === "judge" ? "is-on" : undefined} onClick={() => setSideTab("judge")}>판단과 근거</button>
+              <button type="button" role="tab" aria-selected={side === "customer"} className={side === "customer" ? "is-on" : undefined} onClick={() => setSideTab("customer")}>고객이 보낸 것</button>
+            </div>
+            {side === "judge" ? (
+              <section id="tk-sec-system" aria-label="시스템이 판단한 것">
+                {detail.processing ? processingPane : (
+                  <SystemTab detail={detail} locked={locked || busy} focus={focus} onWhy={setWhy} onSource={setSource}
+                             onAdjust={setAdjusting} onEdit={edit} />
+                )}
+              </section>
+            ) : (
+              <section id="tk-sec-customer" aria-label="고객 문의 원문">
+                <CustomerTab detail={detail} />
+              </section>
+            )}
+          </section>
         </div>
-        <section id="tk-sec-system" className="tk-sec" aria-label="시스템이 판단한 것">
-          <h2 className="tk-sec__h">시스템이 판단한 것</h2>
-          {detail.processing ? processingPane : (
-            <SystemTab detail={detail} locked={locked || busy} focus={focus} onWhy={setWhy} onSource={setSource}
-                       onAdjust={setAdjusting} onEdit={edit} />
-          )}
-        </section>
-        <section id="tk-sec-history" className="tk-sec" aria-label="이력">
-          <h2 className="tk-sec__h">이력</h2>
-          <HistoryTab ticketId={ticketId} canReply={canReply} onReply={() => setReplying(true)}
-                      escalated={new Map(subs.filter((x) => x.sub_ticket.status === "ESCALATED").map((x) => [x.sub_ticket.seq, x.sub_ticket.sub_ticket_id]))}
-                      onMailReply={(subId) => void action(() => api.deptReply(subId, MAIL_REPLY_DEMO, true), "회신을 반영하지 못함")} />
-        </section>
+        <details className="tk-fold" id="tk-fold-memo">
+          <summary>내부 메모 <span className="tk-fold__n">{notes.data?.length ?? 0}</span><span className="tk-fold__hint">고객에게 보이지 않습니다</span></summary>
+          <MemoCard ticketId={ticketId} agent={agent} />
+        </details>
+        <details className="tk-fold" id="tk-sec-history" open={historyOpen} onToggle={(e) => setHistoryOpen((e.target as HTMLDetailsElement).open)}>
+          <summary>이력</summary>
+          <section aria-label="이력">
+            <HistoryTab ticketId={ticketId} canReply={canReply} onReply={() => setReplying(true)}
+                        escalated={new Map(subs.filter((x) => x.sub_ticket.status === "ESCALATED").map((x) => [x.sub_ticket.seq, x.sub_ticket.sub_ticket_id]))}
+                        onMailReply={(subId) => void action(() => api.deptReply(subId, MAIL_REPLY_DEMO, true), "회신을 반영하지 못함")} />
+          </section>
+        </details>
       </div>
 
       {why && <WhyPopup label={why.label} why={{ 결과: why.result, 근거: why.evidence, ...why.why }} onClose={() => setWhy(null)}

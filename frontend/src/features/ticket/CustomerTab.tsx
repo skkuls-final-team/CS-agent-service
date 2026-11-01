@@ -3,7 +3,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { api, ApiError, type Detail, type Field } from "../../api";
-import { CHANNEL, label } from "../../app/labels";
 import { Button, Chip } from "../../ui";
 
 const FOLD = 600; // 이보다 긴 원문은 접는다(FR-030 예외 5행). 길이는 구현 선택
@@ -81,10 +80,8 @@ export function CustomerTab({ detail }: { detail: Detail }) {
 
   return (
     <div className="tk-pane">
-      <dl className="tk-kv">
-        <div><dt>접수</dt><dd>{utc(t.received_at_utc)}</dd></div>
-        <div><dt>채널</dt><dd>{label(CHANNEL, t.channel)}</dd></div>
-        <div><dt>고객사</dt><dd>{t.company_masked} <Chip tone="outline">{t.customer_tier}</Chip></dd></div>
+      {/* 접수 시각·채널·고객사·등급은 머리에 있다. 여기에는 머리에 없는 것만 한 줄로 */}
+      <dl className="tk-kv tk-kv--line">
         <div><dt>고객</dt><dd>{t.customer_id}, {t.country}</dd></div>
         <div><dt>제품</dt><dd>{products.some(Boolean) ? [...new Set(products.filter(Boolean))].join(", ") : <Chip tone="crit">미확인</Chip>}</dd></div>
         <div><dt>언어</dt><dd>{langName(t.language)}{bodyLang}{t.body_language_uncertain && <> <Chip tone="crit">본문 언어 판정 불확실</Chip></>}</dd></div>

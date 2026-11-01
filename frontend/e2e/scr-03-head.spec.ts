@@ -42,7 +42,7 @@ test("SCR-03-AC-23: 접수함에서 열면 'n / 전체'가 보이고, 다음 문
   await expect(page).toHaveURL(new RegExp(`/tickets/${ids[1]}$`));
 });
 
-test("SCR-03-AC-24: 탭 없이 '고객 문의 원문'과 '답변 초안'이 나란히 있고, 그 아래에 '시스템이 판단한 것'과 '이력'이 순서대로 있다", async ({ page, request }) => {
+test("SCR-03-AC-24 (add-ticket-detail-layout): '답변 초안'과 '판단과 근거'가 한 줄에 나란히 있고, 고객 원문은 탭으로 바꿔 보며, 내부 메모·이력은 접혀 있다가 열면 보인다", async ({ page, request }) => {
   const list = await (await request.get("http://localhost:8000/tickets?dept=TS_LV&size=200&include_closed=true")).json();
   let id = "";
   for (const r of list.rows) {
@@ -51,21 +51,32 @@ test("SCR-03-AC-24: 탭 없이 '고객 문의 원문'과 '답변 초안'이 나�
   }
   expect(id).not.toBe("");
   await useSession(page, { dept: "TS_LV" });
-  await page.goto(`/tickets/${id}`);
-  const customer = page.getByRole("region", { name: "고객 문의 원문" });
+  await page.goto(`/tickets/${id}?tab=system`);
   const send = page.getByRole("region", { name: "답변 초안" });
-  await expect(customer).toBeVisible();
+  const side = page.getByRole("region", { name: "판단과 고객 원문" });
   await expect(send).toBeVisible();
-  await expect(page.getByRole("tab", { name: /^고객 문의 원문/ })).toHaveCount(0);
-  const [c, s, sys, hist] = await Promise.all([customer.boundingBox(), send.boundingBox(),
-    page.getByRole("region", { name: "시스템이 판단한 것" }).boundingBox(), page.getByRole("region", { name: "이력" }).boundingBox()]);
-  expect(c!.x).toBeLessThan(s!.x); // 왼쪽 읽기, 오른쪽 쓰기
-  expect(Math.abs(c!.y - s!.y)).toBeLessThan(5); // 같은 줄
-  expect(sys!.y).toBeGreaterThan(Math.max(c!.y + c!.height, s!.y + s!.height) - 1); // 두 칸 아래
-  expect(hist!.y).toBeGreaterThan(sys!.y);
-  // 옛 탭 주소는 그 구역으로 스크롤한다
+  await expect(side).toBeVisible();
+  const [s, d] = await Promise.all([send.boundingBox(), side.boundingBox()]);
+  expect(s!.x).toBeLessThan(d!.x); // 왼쪽 쓰기, 오른쪽 판단
+  expect(Math.abs(s!.y - d!.y)).toBeLessThan(5); // 같은 줄
+  await expect(page.getByRole("region", { name: "시스템이 판단한 것" })).toBeVisible();
+  // 고객이 보낸 것 탭: 원문과 번역 칸
+  await page.getByRole("tab", { name: "고객이 보낸 것" }).click();
+  await expect(page.getByRole("region", { name: "고객 문의 원문" })).toBeVisible();
+  await expect(page.getByTestId("inquiry-body")).toBeVisible();
+  // 위쪽 [원문 보기]도 같은 탭으로 바꾼다
+  await page.getByRole("tab", { name: "판단과 근거" }).click();
+  await page.getByRole("button", { name: "원문 보기" }).click();
+  await expect(page.getByRole("tab", { name: "고객이 보낸 것" })).toHaveAttribute("aria-selected", "true");
+  // 내부 메모·이력은 접혀 있다
+  await expect(page.getByRole("region", { name: "이력" })).toBeHidden();
+  await page.locator("#tk-sec-history > summary").click();
+  await expect(page.getByRole("region", { name: "이력" })).toBeVisible();
+  // 옛 탭 주소는 그 구역을 연다
   await page.goto(`/tickets/${id}?tab=history`);
-  await expect(page.getByRole("region", { name: "이력" })).toBeInViewport();
+  await expect(page.getByRole("region", { name: "이력" })).toBeVisible();
+  await page.goto(`/tickets/${id}?tab=customer`);
+  await expect(page.getByRole("tab", { name: "고객이 보낸 것" })).toHaveAttribute("aria-selected", "true");
 });
 
 test("SCR-03-AC-25: 초안을 고치는 중에도 ⑤ 검증이 지적한 문장이 형광펜으로 보이고, 그 문장을 지우면 표시가 사라진다", async ({ page, request }) => {
@@ -108,6 +119,7 @@ test("SCR-03-AC-26 (최신 목업): 내부 메모를 남기면 남긴 사람과 
   const text = `시험 메모 ${Date.now()}`;
   await useSession(page, { dept: "TS_LV", agent: "leo" });
   await page.goto(`/tickets/${id}`);
+  await page.locator("#tk-fold-memo > summary").click(); // 내부 메모는 접혀 있다
   const memo = page.getByRole("region", { name: "내부 메모" });
   await expect(memo).toContainText("고객에게 보이지 않습니다");
   await expect(memo.getByRole("button", { name: "메모 남기기" })).toBeDisabled(); // 비어 있으면 꺼짐
@@ -158,6 +170,7 @@ test.describe.serial("이관 메일 (최신 목업)", () => {
     await expect(box).toContainText(`[${id}] 이관 요청 · ONSITE_REQUIRED`);
     await p4.getByRole("button", { name: "이관", exact: true }).click();
     await expect(p4).toBeHidden();
+    await page.locator("#tk-sec-history:not([open]) > summary").click(); // 이력은 접혀 있다(이미 열려 있으면 건너뜀)
     const history = page.getByRole("region", { name: "이력" });
     await expect(history.getByTestId("timeline")).toContainText("이관 요청 메일 발송");
     await expect(history.getByTestId("mail-wait")).toBeVisible();
@@ -188,7 +201,7 @@ test("SCR-03-AC-29 (최신 목업, 변경 add-body-translation): 번역이 없�
     await route.fulfill({ json: { ticket_id: id, body_ko: KO, cached: false } });
   });
   await useSession(page, { dept: "TS_LV" });
-  await page.goto(`/tickets/${id}`);
+  await page.goto(`/tickets/${id}?tab=customer`);
   const block = page.getByTestId("body-ko-block");
   await expect(block).toContainText("한국어 번역 · 검토용");
   await block.getByRole("button", { name: "번역 보기" }).click();

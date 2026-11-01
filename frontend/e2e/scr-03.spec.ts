@@ -41,6 +41,7 @@ test.describe("시연 티켓 읽기", () => {
     await expect(marks.first()).toBeVisible();
     await expect(marks.filter({ hasText: "ACB-AS-2000" })).toHaveCount(1);
 
+    await page.getByRole("tab", { name: "판단과 근거" }).click(); // 오른쪽 칸은 탭으로 바꿔 본다(add-ticket-detail-layout)
     await expect(row(page, 1, "C-01")).toContainText(st.category_code);
     await expect(row(page, 1, "C-02")).toContainText(st.urgency_flag);
     await expect(row(page, 1, "C-03")).toContainText(st.priority);
@@ -82,7 +83,7 @@ test.describe("시연 티켓 읽기", () => {
 
   test("SCR-03-AC-4: 000004 사본 — 프랑스어 초안 옆에 한국어 대역, '520.00 USD'가 조회값 링크", async ({ page, request }) => {
     const draft = (await detail(request, DEMO_04)).sub_tickets[0].drafts.find((x: Json) => x.message_type === "FINAL_REPLY");
-    await page.goto(`/tickets/${DEMO_04}`);
+    await page.goto(`/tickets/${DEMO_04}?tab=system`);
     const card = page.locator('[data-testid=draft-card][data-type="FINAL_REPLY"]');
     await expect(card.locator(".tk-draft__head")).toContainText("fr");
     await expect(card.getByTestId("gloss")).toHaveText(draft.gloss.body);
@@ -106,7 +107,7 @@ test.describe("시연 티켓 읽기", () => {
   });
 
   test("SCR-03-AC-6: SAFETY 문의 초안의 검토 표시는 5개, ④ '확인 필요: 안전 문의'", async ({ page }) => {
-    await page.goto(`/tickets/${DEMO_17}`);
+    await page.goto(`/tickets/${DEMO_17}?tab=system`);
     const marks = page.getByTestId("draft-card").first().getByTestId("review-marks").locator("[data-no]");
     await expect(marks).toHaveCount(5);
     await expect(marks.nth(3)).toHaveText("④ 확인 필요: 안전 문의");
@@ -117,7 +118,7 @@ test.describe("시연 티켓 읽기", () => {
       const m = d.sub_tickets[0].drafts[0].review_marks.marks.find((x: Json) => x.no === 5);
       Object.assign(m, { passed: false, state: "FAILED", text: "⑤ 검증 못 함(실패)", full_text: "⑤ 검증 못 함(실패): 시간 초과 2회" });
     });
-    await page.goto(`/tickets/${DEMO_17}`);
+    await page.goto(`/tickets/${DEMO_17}?tab=system`);
     const card = page.getByTestId("draft-card").first();
     await expect(card.locator('[data-no="5"]')).toHaveText("⑤ 검증 못 함(실패)");
     await expect(card.getByRole("button", { name: "다시 검증" })).toBeVisible();
@@ -126,7 +127,7 @@ test.describe("시연 티켓 읽기", () => {
 
   test("SCR-03-AC-12: 대역 만들기 실패(목) — '대역 없음(번역 실패)'와 [다시 만들기], [승인하고 발송] 켜짐", async ({ page }) => {
     await mockDetail(page, DEMO_17, (d) => { d.sub_tickets[0].drafts[0].gloss = null; });
-    await page.goto(`/tickets/${DEMO_17}`);
+    await page.goto(`/tickets/${DEMO_17}?tab=system`);
     const card = page.getByTestId("draft-card").first();
     await expect(card.getByTestId("gloss")).toHaveText("대역 없음(번역 실패)");
     await expect(card.getByRole("button", { name: "다시 만들기" })).toBeVisible();
@@ -136,7 +137,7 @@ test.describe("시연 티켓 읽기", () => {
   test("SCR-03-AC-19 (인용 쪽): 답변 초안 인용에 해결사례가 없다", async ({ page, request }) => {
     const d = await detail(request, DEMO_07, "TS_AUTO");
     await useSession(page, { dept: "TS_AUTO", agent: "leo" });
-    await page.goto(`/tickets/${DEMO_07}`);
+    await page.goto(`/tickets/${DEMO_07}?tab=system`);
     const body = await page.locator('[data-testid=draft-card][data-type="FINAL_REPLY"]').getByTestId("draft-body").innerText();
     expect(body).not.toMatch(/RC-\d|CSV1-\d{6}/); // 해결사례 번호·원래 티켓 번호를 인용하지 않는다(설계 원칙 5)
     expect(d.sub_tickets[0].sub_ticket.evidence_json.every((c: Json) => !String(c.doc_id).startsWith("RC"))).toBeTruthy();
@@ -149,7 +150,7 @@ test.describe("시연 티켓 읽기", () => {
       s.drafts = [];
       s.evidence_rows.find((r: Json) => r.id === "M-C-02").result = "없음(근거 없음)";
     });
-    await page.goto(`/tickets/${DEMO_07}`);
+    await page.goto(`/tickets/${DEMO_07}?tab=system`);
     await tab(page, "답변").click();
     await expect(page.getByTestId("no-draft")).toContainText("근거 없음 — 상담원 작성 필요");
     const editor = page.getByRole("textbox", { name: "직접 쓰는 답변" });
@@ -183,8 +184,8 @@ test.describe.serial("000017 사본 A: 발송 → 충돌 → 회신", () => {
 
   test("SCR-03-AC-8 + AC-10: 정보 요청 [승인하고 발송] → [발송]이면 '발송됨', 상태 '고객 회신 대기', 1차 응답 '보냄'. 다른 창에서 다시 보내면 P8 '이미 발송된 초안'", async ({ page, context }) => {
     const other = await context.newPage(); // 같은 초안을 연 두 번째 상담원 창(AC-10)
-    await page.goto(`/tickets/${id}`);
-    await other.goto(`/tickets/${id}`);
+    await page.goto(`/tickets/${id}?tab=system`);
+    await other.goto(`/tickets/${id}?tab=system`);
     await expect(other.getByTestId("draft-card").first()).toHaveAttribute("data-state", "draft");
 
     const card = page.getByTestId("draft-card").first();
@@ -236,7 +237,7 @@ test.describe.serial("000017 사본 B: 이관", () => {
 
   test("SCR-03-AC-15: P4에서 사유 없이 [이관]이면 '이관 사유를 고르세요', ONSITE_REQUIRED로 FIELD_SVC에 이관하면 '이관됨'", async ({ page }) => {
     await useSession(page, { dept: "TS_LV", agent: "leo" });
-    await page.goto(`/tickets/${id}`);
+    await page.goto(`/tickets/${id}?tab=system`);
     await page.getByRole("button", { name: "이관", exact: true }).click();
     const p4 = dialog(page, "이관");
     await p4.getByLabel(/이관 사유/).selectOption("");
@@ -259,7 +260,7 @@ test.describe.serial("000004 사본 C: 고치기 → 근거 밖 숫자", () => {
   test.beforeEach(async ({ page }) => useSession(page, { dept: "SALES_OPS", agent: "leo" }));
 
   test("SCR-03-AC-11: 한 문장을 고쳐 [임시 저장]하면 대역이 바뀌고 ⑤가 '고친 뒤 검증 안 함'", async ({ page }) => {
-    await page.goto(`/tickets/${id}`);
+    await page.goto(`/tickets/${id}?tab=system`);
     const card = page.locator('[data-testid=draft-card][data-type="FINAL_REPLY"]');
     const before = await card.getByTestId("gloss").innerText();
     await card.getByRole("button", { name: "본문 고치기" }).click();
@@ -271,7 +272,7 @@ test.describe.serial("000004 사본 C: 고치기 → 근거 밖 숫자", () => {
   });
 
   test("SCR-03-AC-9: 조회값에 없는 숫자를 넣고 승인하면 P7에 '근거 밖 숫자', [그래도 발송]이면 발송된다", async ({ page }) => {
-    await page.goto(`/tickets/${id}`);
+    await page.goto(`/tickets/${id}?tab=system`);
     const card = page.locator('[data-testid=draft-card][data-type="FINAL_REPLY"]');
     await card.getByRole("button", { name: "본문 고치기" }).click();
     const editor = card.getByRole("textbox", { name: "초안 본문" });
@@ -332,7 +333,11 @@ test.describe.serial("000031 사본 D: 우선순위 조정 → RND_FW 이관", (
     await p3.getByRole("button", { name: "조정" }).click();
     await expect(p3).toBeHidden();
     await expect(row(page, 1, "C-03")).toContainText("P4 → P3 (상담원 조정");
-    await expect(row(page, 1, "C-06")).toContainText("1차 응답 24h / 해결 120h");
+    // SLA 줄은 남은 시간과 목표를 1차 응답 기한·해결 기한으로 따로 적는다(add-ticket-detail-layout)
+    await expect(row(page, 1, "C-06")).toContainText("1차 응답 기한");
+    await expect(row(page, 1, "C-06")).toContainText("목표 24h");
+    await expect(row(page, 1, "C-06")).toContainText("해결 기한");
+    await expect(row(page, 1, "C-06")).toContainText("목표 120h");
   });
 
   test("SCR-03-AC-16: RND_FW로 이관된 문의를 RND_FW 상담원이 열면 [임시 저장]·[승인하고 발송] 없이 회신 작성란과 [회신 등록]만", async ({ page, request }) => {
@@ -340,7 +345,7 @@ test.describe.serial("000031 사본 D: 우선순위 조정 → RND_FW 이관", (
     const res = await request.post(api(`/sub-tickets/${sub}/escalate`), {
       headers: H(s.sub_ticket.assigned_dept), data: { dept: "RND_FW", reason_code: "FW_UPDATE_FAILURE", memo: "", expected_version: s.version } });
     expect(res.ok()).toBeTruthy();
-    await page.goto(`/tickets/${id}`);
+    await page.goto(`/tickets/${id}?tab=system`);
     await page.evaluate(() => { localStorage.setItem("cs-agent-dept", "RND_FW"); localStorage.setItem("cs-agent-id", "nora"); });
     await page.reload();
     const writer = page.getByTestId("dept-writer");

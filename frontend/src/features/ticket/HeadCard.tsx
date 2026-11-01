@@ -32,9 +32,11 @@ function SlaLine({ sub }: { sub: SubTicket }) {
 
 export interface InboxNav { ids: string[]; index: number; go: (ticketId: string) => void }
 
-export function HeadCard({ detail, onBack, onReprocess, busy, nav, onEvidence, escalate }: {
+export function HeadCard({ detail, onBack, onReprocess, busy, nav, onEvidence, onOriginal, escalate }: {
   detail: Detail; onBack: () => void; onReprocess: () => void; busy: boolean; nav?: InboxNav;
   onEvidence?: () => void;
+  /** [원문 보기]: 오른쪽 칸을 "고객이 보낸 것"(원문·번역)으로 바꾼다 */
+  onOriginal?: () => void;
   /** [이관]: 부서 작성 영역만 있는 문의면 undefined(버튼 없음) */
   escalate?: { disabled: boolean; title: string; onClick: () => void };
 }) {
@@ -87,16 +89,24 @@ export function HeadCard({ detail, onBack, onReprocess, busy, nav, onEvidence, e
         접수 <b>{ticket.received_at_utc.replace("T", " ").slice(0, 16)}</b> · {label(CHANNEL, ticket.channel)} · {ticket.country ?? "국가 미상"} · 답장 {ticket.language}
         {rep && <SlaLine sub={rep} />}
       </p>
-      {subs.some((x) => x.sub_ticket.summary_ko) && (
-        <div className="tk-sum" data-testid="ai-summary">
-          <span className="tk-sum__k">AI 요약</span>
-          <ul className="tk-sum__list">
-            {subs.filter((x) => x.sub_ticket.summary_ko).map((x) => (
-              <li key={x.sub_ticket.sub_ticket_id}>{subs.length > 1 ? <b>문의 {x.sub_ticket.seq} · </b> : null}{x.sub_ticket.summary_ko}</li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <div className="tk-sum" data-testid="ai-summary">
+        {subs.some((x) => x.sub_ticket.summary_ko) ? (
+          <>
+            <span className="tk-sum__k" title="AI가 원문을 요약한 것입니다. 원문과 다를 수 있으니 보내기 전에 원문을 확인하세요">AI 요약</span>
+            <ul className="tk-sum__list">
+              {subs.filter((x) => x.sub_ticket.summary_ko).map((x) => (
+                <li key={x.sub_ticket.sub_ticket_id}>{subs.length > 1 ? <b>문의 {x.sub_ticket.seq} · </b> : null}{x.sub_ticket.summary_ko}</li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          <>
+            <span className="tk-sum__k tk-sum__k--plain">고객 문의</span>
+            <ul className="tk-sum__list tk-sum__list--raw"><li title={ticket.inquiry_body}>{(ticket.inquiry_subject ?? ticket.inquiry_body).replace(/\s+/g, " ").slice(0, 160)}</li></ul>
+          </>
+        )}
+        {onOriginal && <Button size="sm" onClick={onOriginal} title="고객이 보낸 원문과 한국어 번역을 오른쪽에서 봅니다">원문 보기</Button>}
+      </div>
     </section>
   );
 }
@@ -118,8 +128,17 @@ function ReviewButton({ subTicketId }: { subTicketId: string }) {
   );
 }
 
-/** 지금 할 일 한 줄과 검토 모드. 접수함 줄과 같은 서버 규칙(turn·next_action·review_depth, 변경 add-inbox-turn-depth) */
-export function NowStrip({ detail, deptName }: { detail: Detail; deptName: (code: string | null) => string }) {
+/** 문의 진행 단계. 서버가 준 turn(누구 차례인지)으로 정한다 — 새 값은 없다. 접수·분석·초안은 AI가 해 둔 것 */
+function stepsOf(turn: string): { label: string; state: "done" | "cur" | "todo" }[] {
+  const mk = (labels: string[], cur: number) => labels.map((label, i) => ({ label, state: (i < cur ? "done" : i === cur ? "cur" : "todo") as "done" | "cur" | "todo" }));
+  if (turn === "DONE") return mk(["접수", "분석", "초안", "발송", "고객 회신", "해결"], 6);
+  if (turn === "CUSTOMER") return mk(["접수", "분석", "초안", "발송", "고객 회신", "해결"], 4);
+  if (turn === "DEPT") return mk(["접수", "분석", "초안", "이관", "부서 회신", "발송"], 4);
+  return mk(["접수", "분석", "초안", "상담원 확인", "발송", "고객 회신"], 3);
+}
+
+/** 지금 할 일 한 줄(+ 기한 문장, 단계)과 검토 모드. 접수함 줄과 같은 서버 규칙(turn·next_action·review_depth, 변경 add-inbox-turn-depth) */
+export function NowStrip({ detail, deptName, onShowSend }: { detail: Detail; deptName: (code: string | null) => string; onShowSend?: () => void }) {
   const rep = repOf(detail);
   if (!rep || detail.processing) return null;
   const done = rep.turn === "DONE";
@@ -128,6 +147,7 @@ export function NowStrip({ detail, deptName }: { detail: Detail; deptName: (code
   const shown = pending ?? rep;
   const text = shown.next_action === "WAIT_DEPT"
     ? `${deptName(shown.sub_ticket.escalated_to)} 회신 대기 — ${NEXT_HINT.WAIT_DEPT}` : label(NEXT_HINT, shown.next_action);
+  const band = alertBand(detail);
   return (
     <section className={`tk-now tk-now--${pending ? "me" : done ? "done" : waiting ? "wait" : "me"}`} aria-label="지금 할 일" data-testid="now-strip">
       <span className="tk-now__k">{pending ? "내 차례" : done ? "완료" : waiting ? "대기" : "내 차례"}</span>
@@ -138,43 +158,44 @@ export function NowStrip({ detail, deptName }: { detail: Detail; deptName: (code
           검토 모드 · {DEPTH[rep.review_depth]}
         </span>
       )}
-      <span className="tk-now__scope"><i />AI 처리 범위: {detail.sub_tickets.some((x) => x.auto_state !== "NONE") ? "접수·분석·초안·발송" : "접수·분석·초안"}</span>
+      {band && (
+        <span className={`tk-now__alert tk-now__alert--${band.tone}`} role="alert" data-testid="now-alert">
+          <b>{band.title}</b> {band.text}
+          {band.showSend && onShowSend && <button type="button" className="tk-link tk-link--b" onClick={onShowSend}>보낼 것 보기</button>}
+        </span>
+      )}
+      <ol className="tk-now__steps" aria-label="진행 단계">
+        {stepsOf(rep.turn).map((st, i) => (
+          <li key={st.label} className={`is-${st.state}`} aria-current={st.state === "cur" ? "step" : undefined}>
+            <span className="tk-now__dot">{st.state === "done" ? "✓" : i + 1}</span>{st.label}
+          </li>
+        ))}
+        <li className="tk-now__scope"><i />AI 처리 범위: {detail.sub_tickets.some((x) => x.auto_state !== "NONE") ? "접수·분석·초안·발송" : "접수·분석·초안"}</li>
+      </ol>
     </section>
   );
 }
 
-/** H-03 경고 띠. 1차 응답 경고가 먼저(FR-027), 회신 대기면 안내만 */
-export function AlertBand({ detail, onShowSend }: { detail: Detail; onShowSend: () => void }) {
+/** H-03 기한 경고 문장. 별도 붉은 띠 대신 "지금 할 일" 띠 안에 넣는다. 1차 응답 경고가 먼저(FR-027), 회신 대기면 안내만 */
+function alertBand(detail: Detail): { tone: "neg" | "crit" | "neu"; title: string; text: string; showSend: boolean } | null {
   const rep = repOf(detail);
   if (!rep?.sla) return null;
   const sla = rep.sla;
   const open = rep.alerts.filter((a) => !a.cleared_at_utc).map((a) => a.alert_type);
   const pct = (e: number, t: number) => Math.round((e / t) * 100);
-  if (rep.sub_ticket.status === "WAITING_CUSTOMER") {
-    return <div className="tk-strip tk-strip--neu" role="status"><b>고객 회신 대기</b><span>해결 시계가 멈춰 있습니다.</span></div>;
-  }
+  if (rep.sub_ticket.status === "WAITING_CUSTOMER") return { tone: "neu", title: "고객 회신 대기", text: "해결 시계가 멈춰 있습니다.", showSend: false };
   const fr = open.find((a) => a.startsWith("FR_"));
   if (fr && sla.fr_target_h !== null && !rep.sub_ticket.first_response_at_utc) {
     const e = num(sla.fr_elapsed_h) ?? 0;
     const over = fr.endsWith("BREACHED") || e > sla.fr_target_h; // 경고가 아직 AT_RISK여도 시계가 넘었으면 "지남"
-    return (
-      <div className={`tk-strip ${over ? "tk-strip--neg" : "tk-strip--crit"}`} role="alert">
-        <b>{over ? "1차 응답 기한 지남" : "1차 응답 기한 임박"}</b>
-        <span>1차 응답 기한 {sla.fr_target_h} h 중 {e.toFixed(1)} h가 지났습니다({pct(e, sla.fr_target_h)} %). 정보 요청을 먼저 보내면 1차 응답으로 인정됩니다.</span>
-        <Button size="sm" onClick={onShowSend}>보낼 것 보기</Button>
-      </div>
-    );
+    return { tone: over ? "neg" : "crit", title: over ? "1차 응답 기한 지남" : "1차 응답 기한 임박",
+      text: over ? "정보 요청을 먼저 보내면 1차 응답으로 인정됩니다." : `1차 응답 기한 ${sla.fr_target_h} h 중 ${e.toFixed(1)} h가 지났습니다(${pct(e, sla.fr_target_h)} %). 정보 요청을 먼저 보내면 1차 응답으로 인정됩니다.`, showSend: true };
   }
   const r = open.find((a) => a.startsWith("RES_"));
   if (r && sla.res_target_h !== null) {
     const e = num(sla.res_elapsed_h) ?? 0;
     const over = r.endsWith("BREACHED") || e > sla.res_target_h;
-    return (
-      <div className={`tk-strip ${over ? "tk-strip--neg" : "tk-strip--crit"}`} role="alert">
-        <b>{over ? "해결 기한 지남" : "해결 기한 임박"}</b>
-        <span>해결 기한 {sla.res_target_h} h 중 {e.toFixed(1)} h가 지났습니다.</span>
-      </div>
-    );
+    return { tone: over ? "neg" : "crit", title: over ? "해결 기한 지남" : "해결 기한 임박", text: `해결 기한 ${sla.res_target_h} h 중 ${e.toFixed(1)} h가 지났습니다.`, showSend: false };
   }
   return null;
 }
