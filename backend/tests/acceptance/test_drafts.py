@@ -176,6 +176,66 @@ def test_ac_021_3_no_evidence_no_draft(conn, index):
     assert "근거 없음 — 상담원 작성 필요" in out.state.sub_tickets[0].flags
 
 
+def test_ac_021_6_sources_do_not_answer_no_draft(conn, index):
+    """제안 AC-021-6 (변경 fix-draft-no-relevant-evidence): 후보가 있어도 L4가 NOT_IN_SOURCES → 초안 없음, 다시 만들지 않음."""
+    fake = FakeTransport(L1=[l1("TECH_SPEC", "fr", query="enclosure paint colour RAL 9005")], L2=[L2_QUOTE],
+                         L4=[{"body": "Notre équipe va vérifier.", "citations": [], "numbers_used": [],
+                              "coverage": "NOT_IN_SOURCES"}], L7=[GLOSS_OK])
+    out = run_ticket(conn, fake, WordCountEmbedder(), ticket_input(conn, "CSV1-000004"))
+    sub = out.state.sub_tickets[0]
+    assert out.drafts == [] and fake.count("L4") == 1
+    assert "근거 없음 — 상담원 작성 필요" in sub.flags
+    assert sub.doc_candidates  # 근거 후보 목록은 그대로 남는다
+    assert "Set coverage." in next(p for c, p in fake.prompts if c == "L4")
+
+
+def test_ac_021_7_partial_keeps_draft(conn, index):
+    """제안 AC-021-7: L4가 PARTIAL이면 초안을 둔다."""
+    fake = FakeTransport(L1=[l1("QUOTE", "fr", "DEADLINE", "price quotation")], L2=[L2_QUOTE],
+                         L4=[{"body": QUOTE_BODY, "citations": [], "numbers_used": [], "coverage": "PARTIAL"}],
+                         L7=[GLOSS_OK])
+    out = run_ticket(conn, fake, WordCountEmbedder(), ticket_input(conn, "CSV1-000004"))
+    (draft,) = out.drafts
+    assert draft.message_type == "FINAL_REPLY" and "근거 없음 — 상담원 작성 필요" not in out.state.sub_tickets[0].flags
+
+
+class CoverageByCategory(FakeTransport):
+    """L4만 지시문의 유형 이름으로 응답을 고른다(복합 문의의 하위 문의 처리 순서와 상관없게)."""
+
+    def __init__(self, l4_by_category, **replies):
+        super().__init__(**replies)
+        self.l4_by_category = l4_by_category
+
+    def send(self, prompt, schema):
+        if prompt.startswith(CALLS["L4"]):
+            self.prompts.append(("L4", prompt))
+            reply = next(r for name, r in self.l4_by_category.items() if f"customer's {name} request" in prompt)
+            return json.dumps(reply, ensure_ascii=False)
+        return super().send(prompt, schema)
+
+
+def test_ac_021_8_compound_one_sub_not_answered(conn, index):
+    """제안 AC-021-8: 복합 문의에서 매뉴얼 문의만 NOT_IN_SOURCES → 그 문의는 초안 없음, 펌웨어 메일 상태 목록에 "담당자 확인 중"."""
+    def request(seq, category, query):
+        return {"seq": seq, "category_code": category, "category_confidence": 0.9, "evidence_sentences": [f"s{seq}"],
+                "urgency_flag": "NONE", "urgency_evidence": None, "query_en": query}
+
+    fw_body = "Your firmware is already the latest version (RN-ESS-BMS-V3 §1)."
+    fake = CoverageByCategory(
+        {"firmware update": {"body": fw_body, "citations": [], "numbers_used": [], "coverage": "ANSWERED"},
+         "manual and document": {"body": "x", "citations": [], "numbers_used": [], "coverage": "NOT_IN_SOURCES"}},
+        L1=[{"body_language": "ar", "body_language_confidence": 0.95, "sub_tickets": [
+            request(1, "FW_UPDATE", "latest firmware ESS BMS Controller V3 release notes"),
+            request(2, "MANUAL", "ESS BMS Controller V3 manual datasheet document")]}],
+        L2=[{"fields": [field("product_model", "ESS-BMS-V3"), field("current_fw", "3.40")]}],
+        L5=[{"greeting": "مرحبا،", "closing": "مع التحية."}], L7=[{"gloss": "대역"}])
+    out = run_ticket(conn, fake, WordCountEmbedder(), ticket_input(conn, "CSV1-000008"))
+    by_seq = {s.seq: s for s in out.state.sub_tickets}
+    assert [d.sub_ticket_id for d in out.drafts] == [by_seq[1].sub_ticket_id]
+    assert "근거 없음 — 상담원 작성 필요" in by_seq[2].flags
+    assert "2. Manual and document: a member of our team is checking this." in out.drafts[0].body
+
+
 def test_ac_017_5_check_failure_twice_keeps_draft(conn, index):
     """AC-017-5, §3-4 4번: 근거 밖 인용·숫자가 두 번 → 초안은 두고 어긋난 자리를 남긴다."""
     bad = {"body": "Remise de 15 % (POL-RETURN §2).", "citations": [], "numbers_used": []}
@@ -327,6 +387,21 @@ def test_ac_021_2_live(live):
     draft = next(d for d in live("CSV1-000008").drafts if d.sub_ticket_id == "CSV1-000008-1")
     assert draft.language == "ar" and "RN-ESS-BMS-V3" in draft.body and "3.50" not in draft.body
     assert "최신" in draft.gloss.body  # "이미 최신" 취지는 한국어 대역으로 확인한다
+
+
+@needs_key
+def test_ac_021_6_live(conn, index):
+    """제안 AC-021-6 (실제 Gemini): CSV1-000004의 고객·제품으로 문서에 답이 없는 도장 색 질문 → 초안 없음.
+    팀 정답지 GS-065와 같은 경우지만 정답지 본문은 저장소에 넣지 않으므로 시험용 문장을 쓴다."""
+    ticket = ticket_input(conn, "CSV1-000004")
+    ticket["inquiry_body"] = ("Bonjour,\n\nPouvez-vous livrer le boîtier du XGT Panel eXP60 peint en RAL 9005 "
+                              "au lieu de votre couleur standard ?\n\nDétails :\n"
+                              "- Modèle du produit / référence de commande: HMI-XGT-eXP60\n\nMerci.")
+    out = run_ticket(conn, default_transport(), WordCountEmbedder(), ticket)
+    sub = out.state.sub_tickets[0]
+    assert not sub.missing_blocking_info and sub.doc_candidates
+    assert [d for d in out.drafts if d.message_type == "FINAL_REPLY"] == []
+    assert "근거 없음 — 상담원 작성 필요" in sub.flags
 
 
 @needs_key

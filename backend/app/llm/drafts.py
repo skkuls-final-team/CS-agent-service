@@ -15,8 +15,8 @@ from app.llm.client import LlmError, Transport, generate_json, load_prompt
 from app.retrieval.numbers import VERDICT_LATEST, VERDICT_UPDATE
 
 L3_PROMPT = "l3_info_request_v1.md"
-L4_PROMPT = "l4_draft_v2.md"
-L4_DEPT_PROMPT = "l4_draft_v3.md"  # 부서 회신이 있을 때만(<dept_reply> 칸, 변경 add-dept-reply C-162)
+L4_PROMPT = "l4_draft_v4.md"  # v2 + coverage 규칙(변경 fix-draft-no-relevant-evidence)
+L4_DEPT_PROMPT = "l4_draft_v5.md"  # 부서 회신이 있을 때만(<dept_reply> 칸, 변경 add-dept-reply C-162). v3 + coverage 규칙
 L7_PROMPT = "l7_gloss_v1.md"
 SKELETONS_FILE = "l4_category_skeletons_v1.md"
 
@@ -162,9 +162,14 @@ REPLY_SCHEMA: dict = {
             },
         },
         "numbers_used": {"type": "array", "items": {"type": "string"}},
+        "coverage": {"type": "string", "enum": ["ANSWERED", "PARTIAL", "NOT_IN_SOURCES"]},
     },
-    "required": ["body", "citations", "numbers_used"],
+    "required": ["body", "citations", "numbers_used", "coverage"],
 }
+# 코드가 검사하는 스키마: coverage는 없어도 된다(없으면 ANSWERED로 본다, 변경 fix-draft-no-relevant-evidence 결정 1)
+REPLY_CHECK_SCHEMA: dict = {**REPLY_SCHEMA, "required": ["body", "citations", "numbers_used"]}
+# 근거 후보가 있어도 물은 것에 하나도 답하지 못함 → 근거 없음과 같은 길(FR-016 처리 5, FR-021 처리 2)
+COVERAGE_NONE = "NOT_IN_SOURCES"
 
 
 def write_reply(
@@ -215,7 +220,10 @@ def write_reply(
     body, check, cites = "", CheckResult(False), []
     try:
         for attempt in range(2):  # 대조·길이가 어긋나면 1회 다시 만든다(§3-4 4번, FR-021 예외 4행)
-            result = generate_json(transport, "L4", L4_DEPT_PROMPT if dept_reply else L4_PROMPT, fields, REPLY_SCHEMA)
+            result = generate_json(transport, "L4", L4_DEPT_PROMPT if dept_reply else L4_PROMPT, fields, REPLY_SCHEMA,
+                                   check_schema=REPLY_CHECK_SCHEMA)
+            if result.data.get("coverage") == COVERAGE_NONE:  # 다시 만들지 않는다(결정 2)
+                return None, [FLAG_NO_EVIDENCE_DRAFT]
             body = result.data["body"].strip()
             cites = result.data["citations"]
             check = check_draft(body, sections, allowed_texts)
