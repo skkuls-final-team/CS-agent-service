@@ -167,3 +167,31 @@ def test_ac_049_5_live():
     draft = Draft("CSV1-000004-1", "FINAL_REPLY", "fr", body, gloss=Gloss("ko", "견적은 90일 동안 유효합니다 (POL-ORDER §5)."))
     result = verify_draft(default_transport(), draft, ["Combien de temps le devis est-il valable ?"], [POL_ORDER_5], [])
     assert result.error is None and "대역 오역" in result.mark()
+
+
+# --- 정책으로 넣는 "가능하면 보내 주실 것" 한 줄 (변경 fix-verify-optional-line) ---
+
+OPTIONAL_LINE = "If available, please also send us the serial number from the nameplate."
+RN_BMS_HISTORY = Source("RN-ESS-BMS-V3", "1", "Release history", "Release history: 3.30, 3.40 (2025-05-19).")
+FW_LATEST = [("fw_latest_at_intake", "3.40", None, "firmware_history.csv:ESS-BMS-V3/3.40"),
+             ("fw_verdict", "already the latest version", None, "firmware_history.csv:ESS-BMS-V3/3.40")]
+
+
+def test_l8_prompt_has_policy_rule(conn, index):
+    """변경 fix-verify-optional-line: L8 지시문 v2에 정책 문장(가능하면 보내 주실 것, 상태 목록) 예외가 있다."""
+    fake, _ = run(conn, L4=[l4(QUOTE_BODY)], L7=[GLOSS_OK], L8=[{"findings": []}])
+    l8_prompt = next(p for c, p in fake.prompts if c == "L8")
+    assert "Company policy may add two things to a reply" in l8_prompt and '"if available"' in l8_prompt
+
+
+@needs_key
+def test_ac_049_8_optional_line_live():
+    """제안 AC-049-8 (실제 Gemini): 끝의 "가능하면 제조번호" 한 줄은 질문과 다름으로 지적하지 않는다."""
+    body = ("Your current firmware 3.40 is already the latest version available at the time of your inquiry "
+            f"(RN-ESS-BMS-V3 §1). {OPTIONAL_LINE}")
+    draft = Draft("CSV1-000008-1", "FINAL_REPLY", "en", body,
+                  gloss=Gloss("ko", "현재 펌웨어 3.40은 문의 시점의 최신 버전입니다 (RN-ESS-BMS-V3 §1). 가능하면 명판의 제조번호도 보내 주십시오."))
+    result = verify_draft(default_transport(), draft, ["Our ESS BMS Controller V3 runs firmware 3.40. Is there a newer version?"],
+                          [RN_BMS_HISTORY], FW_LATEST)
+    assert result.error is None
+    assert not [f for f in result.findings if f.kind == "OFF_TOPIC" and "serial" in f.quote.lower()], result.findings

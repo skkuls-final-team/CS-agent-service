@@ -15,7 +15,7 @@ from app.llm.drafts import GLOSS_LANGUAGE, LANGUAGE_NAMES, Draft, Source
 from app.pipeline.compose import template
 from app.pipeline.state import VerifyFinding
 
-L8_PROMPT = "l8_verify_v1.md"
+L8_PROMPT = "l8_verify_v2.md"  # v1 + 정책 문장(가능하면 보내 주실 것, 상태 목록) 예외(변경 fix-verify-optional-line)
 STATUS_HEAD = template()["head"]  # 복합 문의 메일의 문의 상태 목록 머리(FR-022 처리 3, 고정 문안)
 
 GLOSS_KIND = "GLOSS_MISTRANSLATION"
